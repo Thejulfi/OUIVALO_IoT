@@ -1,549 +1,394 @@
 #include <Arduino.h>
-#include <ArduinoLowPower.h>
-#include <SPI.h>
-#include <MFRC522.h>
 #include <SigFox.h>
-#include "ZeroPowerManager.h" 
-#include <Wire.h>
-#include <Adafruit_Sensor.h>
-#include <Adafruit_BME280.h>
-#include <DHT.h>
-
+#include <ArduinoLowPower.h>
+#include <MFRC522.h>
+#include <SPI.h>
+#include <DHT.h>  
 
 // ------- Mode de fonctionnement -------
 volatile int OPERATING_MODE;
 
-#define OUVERTURE_MODE 11 //code de correspondance pour le mode de fonctionnement d'ouverture
-#define FERMETURE_MODE 12 //code de correspondance pour le mode de fonctionnement de la fermeture
-#define SLEEPING_MODE 13 //code de correspondance pour le mode de fonctionnement de mise en sommeil
-// ---------------------------------------
+#define INIT 10 //code de correspondance pour le mode de fonctionnement d'ouverture
+#define ON_MOTOR 11 //code de correspondance pour le mode de fonctionnement d'ouverture
+#define ROUTINE 12 //code de correspondance pour le mode de fonctionnement d'ouverture
+#define SEND_MSG 13
+#define SLEEPING 14 //code de correspondance pour le mode de fonctionnement d'ouverture
+// ------------------------------------- 
 
-#define attach_interrupt 1
+// ------- Gestion des interruptions ------
+#define wk_button 0 // Broche de la premiere interruption pour ouverture du bac
+#define wk_door A1 // Broche de la seconde interruption après fermeture du bac
+#define wk_alert 1 // Broche d'interruption du bouton poussoir
+volatile int ALERT_FLAG;
+volatile int ROUTINE_FLAG;
+// ----------------------------------------
 
-// Affectation des broches et création de MFRC522
-#define RST_PIN 6
-#define SS_PIN 11
+// ------- Gestion des mosfets ------------
+#define mosfetRFID 3 //power on RFID
+#define mosfetSWITCHa 4 // switches
+// ----------------------------------------
 
-//Gestion moteurs
-#define pinINA1 A2 // Moteur A, entrée 1 - Commande en PWM possible
-#define pinINA2 A3 // Moteur A, entrée 2 - Commande en PWM possible
-
-// Définition gestion des interruptions
-#define pin_msg 1 // Broche d'interruption du bouton poussoir
-#define pin_alert 0 // Broche d'interruption du bouton poussoir
-#define pin_int2 A1 // Broche de la seconde interruption après fermeture du bac
-
-// Broche du buzzer
-#define buzzer_pin 5
-
-// Affectation des broches pour les LEDs de debug
-#define Rled 2
-#define Jled 3
-#define Bled 4
-
-// Supervision du niveau de batterie
-#define battery_level_pin A5
-
-
-#define relaypin 12
-
-// Interrupteur détectant l'ouverture et la fermeture du loquet.
-#define limit1 A4
-#define limit2 A6
-
-// Standby du moteur
-#define motor_stby 7
-
-#define DEBUG 1 // Variable DEBUG (activation LEDs, delay, liaison série)
-
-//Variables nécessaire à l'implémentation du temps d'attente avec retour en sommeil profond
+// ------- Gestion du temps d'attente ------------
 #define INTERVAL_TAGS 10000 // interval de 30 secondes
 unsigned long time_tags = 0;
+// -----------------------------------------------
 
-#define DHTPIN 2     // what pin we're connected to
-#define DHTTYPE DHT22   // DHT 22  (AM2302)
-int chk;
-float hum;  //Stores humidity value
-float temp; //Stores temperature value
+// ------- Gestion du module RFID RC522 ------------
+#define RST_PIN 6
+#define SS_PIN 11
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+// -------------------------------------------------
+
+#define battery_level_pin A5 // Gestion du niveau de batterie
+#define buzzer_pin 5 // Buzzer
+
+// ------- Gestion du module DHT ------------
+#define DHTPIN 2
+#define DHTTYPE DHT22
+float hum;
+float temp;
+DHT dht(DHTPIN, DHTTYPE);
+// -------------------------------------------
+
+// ------- Limti switches -------------------
+#define limit_open A6
+#define limit_close A4
+// -------------------------------------------
+
+// ------- Gestion des moteurs ------------
+#define pinINA1 A2 // Moteur A, entrée 1 - Commande en PWM possible
+#define pinINA2 A3 // Moteur A, entrée 2 - Commande en PWM possible
+#define motor_stby 7
+// ----------------------------------------
+
+#define DEBUG 0 // Variable à mettre à "1" dans le cas où on souhaite réaliser un debug sur le système.
+#define ledR 13 // Led pour indiquer l'état d'ouverture du bac à l'utilisateur
 
 // Structure du message sigfox qui va être envoyé par le biais du réseau
 typedef struct __attribute__ ((packed)) sigfox_message {
-          int8_t uid[6];
+          int8_t alert[4];
+          unsigned long uid;
+          int8_t separator;
           int8_t battery[2];
-          // int8_t duree[2];
           int8_t temperature[2];
           int8_t humidity;
 } SigfoxMessage;
 
-
-byte readCard[4]; // Variable qui permet de stocker l'UID du tag 
-
-//FLags de gestion du mode de fonctionnement
-volatile int ALERT_FLAG;
-
-// Variable des durées d'exécution relative à chaque partie du code.
-unsigned long duree_ouverture;
-unsigned long duree_fermeture;
-unsigned long sigfox_time;
-
-
-// Création de l'entité de contrôle pour le module arduino RFID
-MFRC522 mfrc522(SS_PIN, RST_PIN);
-
-DHT dht(DHTPIN, DHTTYPE);
-
-// Définition du message pour Sigfox 
 SigfoxMessage msg;
 
-// =========== CONVERTIS UN MESSAGE DE 4 OCTETS EN HEXA
-char *MsgtoHex( byte msg[6])
-{
-  const static char *hex="0123456789ABCDEF";
-  static char toHexBuf[4*3];
-  
-  uint8_t c;
-  
-  for ( uint8_t i = 0; i < 4; i++) {  //
-    c = msg[i];
-    toHexBuf[i+0]= hex[c>>4];
-    toHexBuf[i+1]= hex[c & 0x0f];
-    toHexBuf[i+2]=0;
-    
-  }
-  return toHexBuf;
-}
 
-// =========== MISE EN SOMMEIL DU MODULE RFID RC522
-// Induit la mise en power off du module RFID dans le cas ou le drapeau est à "1"
-void sleep_RC522(bool sleep_flag){
-  if(sleep_flag){
-    digitalWrite(RST_PIN, LOW);
-    delay(100);
+// =========== "ON" ET "OFF" DES MOTEURS ===========
+void power_motor(bool on, int vitesse){
+  if(on){
+    digitalWrite( pinINA1, LOW );
+    analogWrite(pinINA2, vitesse);
   }else{
-    digitalWrite(RST_PIN, HIGH);
-    delay(100);
+    digitalWrite( pinINA1, LOW);
+    analogWrite( pinINA2, 0); 
   }
 }
 
+// =========== GESTION DES MOTEURS ===========
+void motor_management(int routine_f){
+  if(routine_f){
+    power_motor(1, 70);
+    while(!digitalRead(limit_open)){
+      Serial1.println(digitalRead(limit_open));
+    }
+    power_motor(0, 70);
+    
+  }else{
+    power_motor(1, 70);
+    while(!digitalRead(limit_close)){
+      Serial1.println(digitalRead(limit_close));
+    }
+    power_motor(0, 70);
+  }
+}
+
+// Interrupts management
+//******************************************************************
+void wk_closing(){
+  OPERATING_MODE = INIT;
+  ROUTINE_FLAG = 0;
+}
+
+void wk_init() {
+  OPERATING_MODE = INIT;
+  ALERT_FLAG = 0;
+  ROUTINE_FLAG = 1;
+}
+
+void wk_init_a() {
+  OPERATING_MODE = INIT;
+  ALERT_FLAG = 1;
+  ROUTINE_FLAG = 1;
+}
+
+// =========== INITIALISATION DES COMPOSANTS ===========
+void init(bool on){
+  if(on){
+    
+    digitalWrite(motor_stby, HIGH);
+    delay(10);
+    digitalWrite(mosfetSWITCHa, HIGH);
+    delay(10);
+    digitalWrite(RST_PIN, HIGH);
+    delay(10);
+    analogWrite(mosfetRFID, 255); 
+    delay(10);
+
+    SPI.begin();
+    mfrc522.PCD_Init();
+    
+  }else{
+    
+    digitalWrite(motor_stby, LOW);
+    delay(10);
+    digitalWrite(mosfetSWITCHa, LOW);
+    delay(10);
+    digitalWrite(RST_PIN, LOW);
+    delay(10);
+    analogWrite(mosfetRFID, 0);
+    delay(10); 
+   
+  }
+}
 
 // =========== RÉCUPÉRATION DE L'IDENTIFIANT DU TAG
-uint8_t getID() {
-  Serial1.println("trying to get an ID");
-  // Prépataion pour la lecture des tags RFID
-  if ( ! mfrc522.PICC_IsNewCardPresent()) { //Si un nouveau PICC est placé sur le capter RFID on continue
-    return 0;
+unsigned long getID(){
+  if ( ! mfrc522.PICC_ReadCardSerial()) {
+    return -1;
   }
-  if ( ! mfrc522.PICC_ReadCardSerial()) {   //Since a PICC placed get Serial1 and continue
-    return 0;
-  }
-
-  // Début lecture UID
-  for ( uint8_t i = 0; i < 4; i++) {  // Récupération de l'UID de la carte
-    readCard[i] = mfrc522.uid.uidByte[i]; 
-  }
-  mfrc522.PICC_HaltA(); // Arrête de la lecture
-
-  return 1;
+  unsigned long hex_num;
+  hex_num =  mfrc522.uid.uidByte[0] << 24;
+  hex_num += mfrc522.uid.uidByte[1] << 16;
+  hex_num += mfrc522.uid.uidByte[2] <<  8;
+  hex_num += mfrc522.uid.uidByte[3];
+  mfrc522.PICC_HaltA(); // Arrêt de la lecture
+  return hex_num;
 }
 
+// =========== ENVOIS DONNÉS AVEC SIGFOX
+void send_data(SigfoxMessage msg){
 
-// =========== CALLBACK INTERRUPTION BOUTON ALERTE
-void alert_wk(){
-  // Serial1.println("alert wk"); 
-  // delay(50);
-  OPERATING_MODE = OUVERTURE_MODE;
+  Serial1.println("Send data");
+  SigFox.begin();
+  delay(100);
+  SigFox.beginPacket();
+  SigFox.write((uint8_t*)&msg, sizeof(msg));
+  int ret = SigFox.endPacket();
+  if (ret == 0)
+    Serial1.println("OK");
+  else
+    Serial1.println("KO");
 
-  // Serial1.println("changement du mode de fonctionnement");
-  // Serial1.println(OPERATING_MODE);
-  // delay(50);
-  ALERT_FLAG = 1;
-
-}
-
-// =========== CALLBACK INTERRUPTION BOUTON TAG
-void tag_wk(){
-  // Serial1.println("tag wk");
-  // delay(50);
-  OPERATING_MODE = OUVERTURE_MODE;
-  ALERT_FLAG = 0;
-
-  // Serial1.println("changement du mode de fonctionnement");
-  // Serial1.println(OPERATING_MODE);
-  // delay(50);
-
-}
-
-// =========== CALLBACK INTERRUPTION FERMETURE DU BAC
-void int2_wk(){
-  Serial1.println("second interrupt");
-  delay(50);
-  OPERATING_MODE = FERMETURE_MODE;
-
-  Serial1.println("changement du mode de fonctionnement");
-  Serial1.println(OPERATING_MODE);
+  SigFox.end();
 }
 
 // =========== DÉTECTION DU NIVEAU DE BATTERIE
 int16_t battery_level(){
+  float max_battery_voltage = 4.2;
+  
   String s_voltage = "";
   int sensorValue = analogRead(battery_level_pin);
-  float voltage = sensorValue * (((6 / 1023.0)*100)/6);
+  float voltage = sensorValue * (((max_battery_voltage / 1023.0)*100)/max_battery_voltage);
   s_voltage.concat(voltage);
 
   return s_voltage.toInt();
 }
 
-// =========== REBOOT
-void reboot() {
-  NVIC_SystemReset();
-  while (1);
-}
+// Setup
+//******************************************************************
+void setup() {
+  
+  //if(DEBUG){
+    Serial1.begin(9600); 
+  //}else{
+    pinMode(ledR, OUTPUT);
+  //}
+  
+  delay(2000); //délais pour laisser le temps de charger un code arduino
 
-// =========== SETUP
-void setup()
-{
-  zpmRTCInit();
+  // Bouton déclenchement interruption
+  pinMode(wk_button, INPUT);
+  pinMode(wk_button, INPUT); // AJOUTE APRES
+  pinMode(wk_door, INPUT); // AJOUTE APRES
 
-    // INITIALISATION SIGFOX
-  if (DEBUG) {
-    Serial1.begin(9600);
-  }
-
-  // INITIALISATION SIGFOX
-  // SigFox.begin();
-  // delay(200);
-  // SigFox.end();
-  // delay(200);
-
-  if (!SigFox.begin()) {
-    // reboot si problème avec le Sigfox
-    // le reboot se produit dans le cas ou la source d'énergie est instable.
-    reboot();
-  }
-
-  // Send module to standby until we need to send a message
-  SigFox.end();
-
-  if (DEBUG) {
-    // Enable DEBUG prints and LED indication if we are testing
-    SigFox.debug();
-  }
-
-  pinMode(pin_msg, INPUT); //Bouton en pullup
-  pinMode(pin_alert, INPUT); //Bouton en pullup
-  pinMode(pin_int2, INPUT); //Bouton en pullup
-
+  // Buzzer
   pinMode(buzzer_pin, OUTPUT);
-  pinMode(motor_stby, OUTPUT);
-  digitalWrite( motor_stby, LOW);
+  
+  // Mosfets de contrôle d'accès au courant
+  pinMode(mosfetRFID, OUTPUT);
+  pinMode(mosfetSWITCHa, OUTPUT);
 
+  pinMode( pinINA1, OUTPUT );
+  pinMode( pinINA2, OUTPUT );
+
+  // Gestion sommeil composants
+  pinMode(motor_stby, OUTPUT); 
   pinMode(RST_PIN, OUTPUT);
 
-  pinMode(limit1, INPUT); //DEBUG CONSO
-  pinMode(limit2, INPUT); //DEBUG CONSO
+  // Niveau de batterie
+  pinMode(battery_level_pin, INPUT);
 
-  pinMode( pinINA1, OUTPUT ); //DEBUG CONSO
-  pinMode( pinINA2, OUTPUT ); //DEBUG CONSO
+  //Switch
+  pinMode(limit_open, INPUT);
+  pinMode(limit_close, INPUT);
+   
 
-  // Activation des Leds de debug si DEBUG = 1
-
-  pinMode(relaypin, OUTPUT); //DEBUG CONSO
-
-  SPI.begin(); //DEBUG CONSO
-  dht.begin(); //DEBUG CONSO
-
-  OPERATING_MODE = SLEEPING_MODE;
-  ALERT_FLAG = 0;
-  Serial1.println("changement du mode de fonctionnement");
-  Serial1.println(OPERATING_MODE);
- 
-  //------------------------------------------------------------------
-  // Configuration des interruptions
-
-  LowPower.attachInterruptWakeup(pin_msg, tag_wk, FALLING );
-  LowPower.attachInterruptWakeup(pin_alert, alert_wk, FALLING);
-  LowPower.attachInterruptWakeup(pin_int2, int2_wk, FALLING);
-
-  Serial1.println("setup done");
-}
-
-// =========== ENVOIS DONNÉS AVEC SIGFOX
-void send_data(SigfoxMessage msg){
-  Serial1.println("Send data");
-  sigfox_time = millis(); // Millis pour le calcul de la durée de transmission Sigfox
-
-  digitalWrite(Bled, HIGH);
-  
-  // Différent tone du buzzer selon si l'utilisateur envoi une alerte ou non 
-  if(ALERT_FLAG){
-    tone(buzzer_pin, 200, 500);
-  }else{
-    tone(buzzer_pin, 1000, 500);
+  //Initialisation Sigfox
+  if (!SigFox.begin()) {
+    Serial1.println("Shield error or not present!");
+    return;
   }
- 
-  // Démarrage du module
-  SigFox.begin();
-  // Attente d'au moins 30ms pour l'initialisation des fonctionnalité du module.
-  delay(100);
-  
-  // Nettoyage de toute les interruptions en cours.
-  SigFox.status();
-  delay(1);
-
-  //Transmission du message
-  SigFox.beginPacket();
-  SigFox.write((uint8_t*)&msg, sizeof(msg));
-  int ret = SigFox.endPacket();
-  if(ret > 0) {
-          Serial1.println("No transmission");
-  } else {
-          Serial1.println("Transmission ok");
-  }
-  delay(50);
-
   SigFox.end();
-
-  digitalWrite(Bled, LOW);
-  sigfox_time = millis() - sigfox_time;
-}
-
-// =========== FONCTION DE CONTROLE DU MOTEUR
-void power_motor(bool on){
-  if(on){
-    Serial1.println("Motor driver 'on'");
-    //Réveil du module de pilotage
-    digitalWrite( motor_stby, HIGH);
-    delay(100); 
-
-    //Moteur en marche
-    digitalWrite( pinINA1, LOW );
-    analogWrite(pinINA2, 70);
-  }else{
-    //Moteur en marche
-    Serial1.println("Motor driver 'off'");
-    digitalWrite( pinINA1, LOW);
-    analogWrite( pinINA2, 0); 
-
-    //Mise en sommeil du module de pilotage
-    digitalWrite( motor_stby, LOW);
-    delay(100);
-    Serial1.println("c'est good");
-  }
-
-}
-
-// =========== ROUTINE DE MISE EN SOMMEIL DE LA CARTE
-void sleeping_routine(){
-    digitalWrite(relaypin, LOW);
-    delay(50);
-    Serial1.println("sleeping time!!");
-    //zpmPortDisableDigital();
-    zpmPortDisableUSB();
-    zpmPortDisableSPI();
-
-    SPI.end();
-
-    // Mise en sommeil profond du module
-    LowPower.deepSleep();
-}
-
-// =========== ROUTINE DE FONCTIONNEMENT
-void routine(){
-  delay(50);
-  if(ALERT_FLAG){
-    Serial1.println("Alert flag on");
-    duree_ouverture = millis();
-    
-    //------------------------------------------------------------------
-    // Construction du message à envoyer (avec séparation des données par le caractère '_')
-
-    // Niveau de batterie
-    msg.battery[0] = battery_level();
-    msg.battery[1] = '_';
-
-    // UID, ou putôt dans ce cas indication d'une alerte
-    msg.uid[0] = 'A';
-    msg.uid[1] = 'L';
-    msg.uid[2] = 'E';
-    msg.uid[3] = 'R';
-    msg.uid[4] = 'T';
-    msg.uid[5] = '_';
+  SigFox.debug();
   
-    // Durée d'exécution 
-    // msg.duree[0] = (duree_ouverture + sigfox_time)/1000;
-    // msg.duree[1] = '_';
-
-    // Température
-    msg.temperature[0] = (int8_t)dht.readTemperature();
-    msg.temperature[1] = '_';
-
-    // Humidité
-    msg.humidity = (int8_t)dht.readHumidity();
-
-    // Envoi du message
-    send_data(msg);
-
-    // Remise en mode sommeil du device
-    ALERT_FLAG = 0;
-    digitalWrite(relaypin, LOW);
-    delay(50);
-
-    sleeping_routine();
-
-  }else{
-    
-    Serial1.println("Alerte flag off & Message on");
-    delay(100);
-    sleep_RC522(0);
-
-     Serial1.println("je suis après sleep RC522");
-    // Test si lecture d'un badge RFID
-    mfrc522.PCD_Init();
-
-    Serial1.println("je suis après PCD init");
-    if(getID()){
-      Serial1.println("ID GET");
-
-      // digitalWrite(relaypin, LOW);
-      sleep_RC522(1);
-
-      power_motor(1);
-
-      // Clignotement de la Led bleu pour le debug
-      while(digitalRead(limit1)){
-        digitalWrite(Bled, HIGH);
-        delay(200);
-        digitalWrite(Bled, LOW);
-        delay(200);
-      } 
-      power_motor(0);
+  //------------------------------------------------------------------
+  //  Gestion du réveil
   
-      // Formattage de son UID
-      char* hex_txt = MsgtoHex(readCard);
+  pinMode(wk_button , INPUT);
+  LowPower.attachInterruptWakeup(wk_button, wk_init, FALLING);
+  
+  pinMode(wk_door , INPUT);
+  LowPower.attachInterruptWakeup(wk_door, wk_closing, RISING);
+  
+  pinMode(wk_alert , INPUT);
+  LowPower.attachInterruptWakeup(wk_alert, wk_init_a, RISING);
+  
+  //------------------------------------------------------------------
 
-      // UID, ou putôt dans ce cas indication d'une alerte
-      msg.uid[0] = ((String)hex_txt)[0];
-      msg.uid[1] = ((String)hex_txt)[1];
-      msg.uid[2] = ((String)hex_txt)[2];
-      msg.uid[3] = ((String)hex_txt)[3];
-      msg.uid[4] = ((String)hex_txt)[4];
-      msg.uid[5] = '_';
+  // Initialisation des composants 
+  dht.begin();
+  SPI.begin();      // Init SPI bus
+  mfrc522.PCD_Init();
 
-      // Construction du message
-      msg.battery[0] = battery_level();
-      msg.battery[1] = '_';
 
-      // Température
-      msg.temperature[0] = (int8_t)dht.readTemperature();
-      msg.temperature[1] = '_';
+  // Initialisation des flags et définition de mode de fonctionnement initial.
+  OPERATING_MODE = SLEEPING;
+  ALERT_FLAG = 0;
+  ROUTINE_FLAG = 1;
+  
+  Serial1.println("end setup");
 
-      // Humidité
-      msg.humidity = (int8_t)dht.readHumidity();
-
-      duree_ouverture = millis() - duree_ouverture;
-      Serial.println("end message creation");
-      // Mise en sommeil du module
-      digitalWrite(relaypin, LOW);
-      delay(50);
-
-      sleeping_routine();
-      // OPERATING_MODE = SLEEPING_MODE;
-      // Serial1.println("changement du mode de fonctionnement");
-      // Serial1.println(OPERATING_MODE);
-    }
-  }
 }
+//******************************************************************
 
-// =========== LOOP
-void loop()
-{ 
-  Serial1.println("loop");
-  delay(100);
-  
+void routine(int routine_f, bool alert) {
+  if(routine_f){
+    Serial1.println("routine 1");
+      if(mfrc522.PICC_IsNewCardPresent()) {
+        unsigned long uid = getID();
+        if(uid != -1){
+          
+          Serial1.print("Card detected, UID: "); Serial1.println(uid);
 
-  // Switch de changement du mode de fonctionnement
-  switch(OPERATING_MODE){
-    case OUVERTURE_MODE:
+          // ------- Construction du message à envoyer -------
+          if(alert){
+            msg.alert[0] = 'O';
+            msg.alert[1] = 'U';
+            msg.alert[2] = 'I';
+            msg.alert[3] = '_';
+            tone(buzzer_pin, 200, 500);
+            OPERATING_MODE = SEND_MSG; 
+          }else{
+            msg.alert[0] = 'N';
+            msg.alert[1] = 'O';
+            msg.alert[2] = 'N';
+            msg.alert[3] = '_';
+            tone(buzzer_pin, 1000, 500);
+            OPERATING_MODE = ON_MOTOR;
+          }
 
-      digitalWrite(relaypin, HIGH);
-      delay(50);
-      Serial1.println("Je suis dans ouverture");
+          //UID
+          msg.uid = uid;
+          msg.separator = '_';
 
-      duree_ouverture = millis();
-      //Fonction d'attente - 30 secondes
-      if(millis() >= time_tags + INTERVAL_TAGS){
-        Serial1.println("Je suis dans ouverture, temps ecoule");
+          //Battery level
+          msg.battery[0] = battery_level();
+          msg.battery[1] = '_';
+          Serial1.println(battery_level());
 
-        sleep_RC522(1);
-        digitalWrite(motor_stby, LOW);
-        digitalWrite(relaypin, LOW);
+          //Temperature
+          msg.temperature[0] = (int8_t)dht.readTemperature();
+          Serial1.println(dht.readTemperature());
+          
+          msg.temperature[1] = '_';
 
-        delay(50);
+          //Humidity
+          msg.humidity = (int8_t)dht.readHumidity();
+          Serial1.println(dht.readHumidity());
 
-        time_tags +=INTERVAL_TAGS;
-
-        // // LEDs de debug
-        digitalWrite(Jled, HIGH);
-        delay(1000);
-        digitalWrite(Jled, LOW);
-
-        // sleeping_routine();
-        
-        OPERATING_MODE = SLEEPING_MODE;
-        // Serial1.println("changement du mode de fonctionnement");
-        // Serial1.println(OPERATING_MODE);
-
+          // ------------------------------------------
+        }
       }else{
-        Serial1.println("Je suis dans ouverture, routine");
-        // Éxecution de la routine
-        routine();
+        Serial1.println(F("No card found"));
+        
       }
-      break;
+  }else{
+    Serial1.println("routine 2");
+    OPERATING_MODE = ON_MOTOR;
+    
+  }
+}
 
-    case FERMETURE_MODE:
-      digitalWrite(relaypin, HIGH);
-      delay(50);
+// Loop
+//******************************************************************
+void loop() {
 
-      Serial1.println("entrer dans le mode fermeture");
-      duree_fermeture = millis();
-
-      power_motor(1);
-
-      // Clignotement de la Led rouge pour le debug
-      while(digitalRead(limit2)){
-        digitalWrite(Rled, HIGH);
-        delay(200);
-        digitalWrite(Rled, LOW);
-        delay(200);
-      }
-      power_motor(0);
-
-      duree_fermeture = millis() - duree_fermeture;
-     
-      // Température
-      msg.temperature[0] = (int8_t)dht.readTemperature();
-      msg.temperature[1] = '_';
-
-      // Humidité
-      msg.humidity = (int8_t)dht.readHumidity();
-      delay(50);
-     
-      // msg.duree[0] = (duree_ouverture + duree_fermeture + sigfox_time)/1000;
-      // msg.duree[1] = '_';
-      send_data(msg);
+  switch(OPERATING_MODE){
+    case INIT:
+    
+      Serial1.println("INIT mode");
       
-      digitalWrite(relaypin, LOW);
+      init(1);
+
+      OPERATING_MODE = ROUTINE;
+
+      break;
+      
+    case ROUTINE:
+    
+      Serial1.println("ROUTINE mode");
+      
+      routine(ROUTINE_FLAG, ALERT_FLAG);
+      
+      break;
+      
+    case ON_MOTOR:
+    
+      Serial1.println("ON_MOTOR mode");
+      digitalWrite(ledR, HIGH);
+      
+      motor_management(ROUTINE_FLAG);
+
+      if(ROUTINE_FLAG){
+        OPERATING_MODE = SEND_MSG;
+      }else{
+        OPERATING_MODE = SLEEPING; 
+      }
+
+      digitalWrite(ledR, LOW);
+
+      break;
+      
+    case SEND_MSG:
+      Serial1.println("SEND_MSG mode");
+
+      send_data(msg);
       delay(50);
 
-      // Mise en sommeil du module une fois le loquet fermé
-      // sleeping_routine();
-      OPERATING_MODE = SLEEPING_MODE;
-      // Serial1.println("changement du mode de fonctionnement");
-      // Serial1.println(OPERATING_MODE);
+      OPERATING_MODE = SLEEPING;
+      
       break;
 
-    case SLEEPING_MODE:
-      sleeping_routine();
+    case SLEEPING:
+      Serial1.println("SLEEPING mode");
+
+      init(0);
+    
+      LowPower.deepSleep();
       break;
   }
 }
