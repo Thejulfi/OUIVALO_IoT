@@ -30,3 +30,14 @@ The loop of this system works according to operating modes. There is 5 operating
 4. **SEND_MSG** : When the system send a message to the Sigfox backend,
 5. **SLEEPING** : When the entire system goes into sleep mode.
 
+
+## Currently implemented and upcoming features
+
+Features that are implemented for data feedback and future arrivals.
+
+- [x] : Temperature and humidity sensor
+- [x] : Battery level sensor
+- [x] : UID 
+- [ ] : Executing time sensor
+- [ ] : fill level sensor
+
