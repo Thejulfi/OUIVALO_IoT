@@ -20,4 +20,13 @@ The operating routine work as follow :
 
 The goal of such a system is to modernize a composter bins fleet, and gathering data such as temperature, humidity, UID and hour of opening, and so on.
 
-##  
+## Operating modes
+
+The loop of this system works according to operating modes. There is 5 operating mode listed bellow : 
+
+1. **INIT** : turning on all sensors,
+2. **ON_MOTOR** : turing motors to close or open the latch (according to the ROUTINE_FLAG),
+3. **ROUTINE** : attempt to detect an RFID card and message construction,
+4. **SEND_MSG** : When the system send a message to the Sigfox backend,
+5. **SLEEPING** : When the entire system goes into sleep mode.
+
